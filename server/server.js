@@ -275,36 +275,69 @@ app.get('/api/summoner/:gameName/:tagLine', async (req, res) => {
       { headers: { 'X-Riot-Token': RIOT_API_KEY }, timeout: 10000 }
     );
     const summonerData = summonerRes.data;
-    console.log(`[SUMMONER] Level: ${summonerData.summonerLevel}, Icon: ${summonerData.profileIconId}, SummonerId: ${summonerData.id}`);
+    console.log('[SUMMONER] Raw summoner response:', JSON.stringify(summonerData));
+
+    let summonerId = summonerData.id || null;
+
+    // Retry once if id is missing (Riot API bug)
+    if (!summonerId) {
+      console.log('[SUMMONER] id missing from Riot response, retrying in 1s...');
+      await sleep(1000);
+      try {
+        const retryRes = await axios.get(
+          `https://${region}.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/${puuid}`,
+          { headers: { 'X-Riot-Token': RIOT_API_KEY }, timeout: 10000 }
+        );
+        summonerId = retryRes.data.id || null;
+        console.log('[SUMMONER] Retry result - id:', summonerId);
+      } catch (e) {
+        console.log('[SUMMONER] Retry failed:', e.message);
+      }
+    }
+
+    // FALLBACK: Use summonerId extracted from match data
+    if (!summonerId) {
+      const existing = await Summoner.findOne({ puuid }).select('summonerId');
+      summonerId = existing?.summonerId || null;
+      if (summonerId) {
+        console.log(`[SUMMONER] Using cached summonerId from match data: ${summonerId}`);
+      }
+    }
+
+    console.log(`[SUMMONER] Level: ${summonerData.summonerLevel}, Icon: ${summonerData.profileIconId}, SummonerId: ${summonerId}`);
 
     let rankedData = null; // null = fetch failed; {} = fetch ok but unranked
     try {
-      const rankedUrl = `https://${region}.api.riotgames.com/lol/league/v4/entries/by-summoner/${summonerData.id}`;
-      console.log(`[SUMMONER] Fetching ranked from: ${rankedUrl}`);
-      
-      const rankedRes = await axios.get(
-        rankedUrl,
-        { headers: { 'X-Riot-Token': RIOT_API_KEY }, timeout: 10000 }
-      );
+      if (!summonerId) {
+        console.error('[SUMMONER] No summonerId found in Riot response — skipping ranked fetch');
+      } else {
+        const rankedUrl = `https://${region}.api.riotgames.com/lol/league/v4/entries/by-summoner/${summonerId}`;
+        console.log(`[SUMMONER] Fetching ranked from: ${rankedUrl}`);
 
-      console.log(`[SUMMONER] Ranked entries count: ${rankedRes.data.length}`);
-      console.log(`[SUMMONER] Ranked raw:`, JSON.stringify(rankedRes.data));
+        const rankedRes = await axios.get(
+          rankedUrl,
+          { headers: { 'X-Riot-Token': RIOT_API_KEY }, timeout: 10000 }
+        );
 
-      rankedData = { solo: null, flex: null }; // fetch succeeded
-      for (const entry of rankedRes.data) {
-        const mapped = { tier: entry.tier, rank: entry.rank, lp: entry.leaguePoints, wins: entry.wins, losses: entry.losses };
-        console.log(`[SUMMONER] Entry: ${entry.queueType} -> ${entry.tier} ${entry.rank} ${entry.leaguePoints}LP`);
-        if (entry.queueType === 'RANKED_SOLO_5x5') rankedData.solo = mapped;
-        if (entry.queueType === 'RANKED_FLEX_SR') rankedData.flex = mapped;
+        console.log(`[SUMMONER] Ranked entries count: ${rankedRes.data.length}`);
+        console.log(`[SUMMONER] Ranked raw:`, JSON.stringify(rankedRes.data));
+
+        rankedData = { solo: null, flex: null }; // fetch succeeded
+        for (const entry of rankedRes.data) {
+          const mapped = { tier: entry.tier, rank: entry.rank, lp: entry.leaguePoints, wins: entry.wins, losses: entry.losses };
+          console.log(`[SUMMONER] Entry: ${entry.queueType} -> ${entry.tier} ${entry.rank} ${entry.leaguePoints}LP`);
+          if (entry.queueType === 'RANKED_SOLO_5x5') rankedData.solo = mapped;
+          if (entry.queueType === 'RANKED_FLEX_SR') rankedData.flex = mapped;
+        }
+
+        // Save LP history snapshot whenever we have a successful ranked response
+        await LPHistory.create({
+          puuid,
+          timestamp: new Date(),
+          solo: rankedData.solo ? { tier: rankedData.solo.tier, rank: rankedData.solo.rank, lp: rankedData.solo.lp } : null,
+          flex: rankedData.flex ? { tier: rankedData.flex.tier, rank: rankedData.flex.rank, lp: rankedData.flex.lp } : null
+        });
       }
-
-      // Save LP history snapshot whenever we have a successful ranked response
-      await LPHistory.create({
-        puuid,
-        timestamp: new Date(),
-        solo: rankedData.solo ? { tier: rankedData.solo.tier, rank: rankedData.solo.rank, lp: rankedData.solo.lp } : null,
-        flex: rankedData.flex ? { tier: rankedData.flex.tier, rank: rankedData.flex.rank, lp: rankedData.flex.lp } : null
-      });
 
     } catch (rankErr) {
       console.error('[SUMMONER] Ranked fetch FAILED:', rankErr.message);
@@ -325,16 +358,16 @@ app.get('/api/summoner/:gameName/:tagLine', async (req, res) => {
       region,
       summonerLevel: summonerData.summonerLevel,
       profileIconId: summonerData.profileIconId,
-      accountId: summonerData.accountId,
-      summonerId: summonerData.id,
+      accountId: summonerData.accountId || null,
       lastUpdated: new Date()
     };
+    if (summonerId) updateFields.summonerId = summonerId;
     if (rankedData !== null) updateFields.ranked = rankedData;
 
     const summoner = await Summoner.findOneAndUpdate(
       { puuid },
       updateFields,
-      { upsert: true, new: true }
+      { upsert: true, returnDocument: 'after' }
     );
 
     res.json(summoner);
@@ -405,6 +438,15 @@ app.get('/api/matches/:puuid', async (req, res) => {
       const info = matchRes.data.info;
       const participant = info.participants.find(p => p.puuid === puuid);
       if (!participant) continue;
+
+      // EXTRACT SUMMONERID FROM MATCH DATA (Riot API workaround)
+      if (participant.summonerId) {
+        await Summoner.updateOne(
+          { puuid, $or: [{ summonerId: { $exists: false } }, { summonerId: null }] },
+          { $set: { summonerId: participant.summonerId } }
+        );
+        console.log(`[MATCH] Cached summonerId ${participant.summonerId} from match ${matchId}`);
+      }
 
       const durationMin = info.gameDuration / 60;
       const teamKills = info.teams.find(t => t.teamId === participant.teamId)?.objectives?.champion?.kills || 1;
@@ -707,6 +749,9 @@ app.get('/api/summoner-by-puuid/:puuid', async (req, res) => {
       { headers: { 'X-Riot-Token': RIOT_API_KEY }, timeout: 10000 }
     );
 
+    const summonerId = summonerRes.data.id || summonerRes.data.summonerId || null;
+    console.log(`[BY-PUUID] SummonerId resolved: ${summonerId}`);
+
     const routing = REGION_ROUTING[region] || 'americas';
     const accountRes = await axios.get(
       `https://${routing}.api.riotgames.com/riot/account/v1/accounts/by-puuid/${puuid}`,
@@ -715,14 +760,18 @@ app.get('/api/summoner-by-puuid/:puuid', async (req, res) => {
 
     let rankedData = { solo: null, flex: null };
     try {
-      const rankedRes = await axios.get(
-        `https://${region}.api.riotgames.com/lol/league/v4/entries/by-summoner/${summonerRes.data.id}`,
-        { headers: { 'X-Riot-Token': RIOT_API_KEY }, timeout: 10000 }
-      );
-      for (const entry of rankedRes.data) {
-        const mapped = { tier: entry.tier, rank: entry.rank, lp: entry.leaguePoints, wins: entry.wins, losses: entry.losses };
-        if (entry.queueType === 'RANKED_SOLO_5x5') rankedData.solo = mapped;
-        if (entry.queueType === 'RANKED_FLEX_SR') rankedData.flex = mapped;
+      if (!summonerId) {
+        console.error('[BY-PUUID] No summonerId found — skipping ranked fetch');
+      } else {
+        const rankedRes = await axios.get(
+          `https://${region}.api.riotgames.com/lol/league/v4/entries/by-summoner/${summonerId}`,
+          { headers: { 'X-Riot-Token': RIOT_API_KEY }, timeout: 10000 }
+        );
+        for (const entry of rankedRes.data) {
+          const mapped = { tier: entry.tier, rank: entry.rank, lp: entry.leaguePoints, wins: entry.wins, losses: entry.losses };
+          if (entry.queueType === 'RANKED_SOLO_5x5') rankedData.solo = mapped;
+          if (entry.queueType === 'RANKED_FLEX_SR') rankedData.flex = mapped;
+        }
       }
     } catch (rankErr) {
       console.error('[BY-PUUID] Ranked fetch error:', rankErr.message);
@@ -737,11 +786,11 @@ app.get('/api/summoner-by-puuid/:puuid', async (req, res) => {
         region,
         summonerLevel: summonerRes.data.summonerLevel,
         profileIconId: summonerRes.data.profileIconId,
-        summonerId: summonerRes.data.id,
+        summonerId: summonerId,
         lastUpdated: new Date(),
         ranked: rankedData
       },
-      { upsert: true, new: true }
+      { upsert: true, returnDocument: 'after' }
     );
 
     res.json(summoner);
@@ -751,8 +800,6 @@ app.get('/api/summoner-by-puuid/:puuid', async (req, res) => {
   }
 });
 
-// Returns a flat { id -> { icon, name } } map built from runesReforged.json
-// Used by the frontend to build correct DDragon image URLs
 app.get('/api/runes', (req, res) => {
   const map = {};
   for (const tree of runeData) {
