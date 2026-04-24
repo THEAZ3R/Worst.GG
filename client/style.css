@@ -184,32 +184,6 @@ body {
 .winrate-good { color: var(--blue); font-weight: 700; }
 .winrate-bad { color: var(--red); font-weight: 700; }
 
-/* ─── RANK HISTORY ─── */
-.rank-history-section {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 20px;
-  margin-bottom: 25px;
-}
-
-.best-rank {
-  color: var(--gold);
-  font-weight: 700;
-  font-size: 0.95rem;
-  margin-bottom: 12px;
-}
-
-.chart-container { height: 260px; margin-top: 10px; }
-
-.season-note {
-  color: var(--text-muted);
-  font-size: 0.75rem;
-  margin-top: 10px;
-  text-align: right;
-}
-
-/* ─── MASTERY ─── */
 .mastery-section { margin-bottom: 25px; }
 
 .section-header {
@@ -268,7 +242,6 @@ body {
 .mastery-level { color: var(--text); font-size: 0.75rem; margin-top: 2px; }
 .mastery-chest { color: var(--blue); font-size: 0.7rem; margin-top: 2px; }
 
-/* ─── MATCHES ─── */
 .matches-section { margin-top: 20px; }
 
 .match-card {
@@ -380,7 +353,6 @@ body {
 .opponent-name { font-weight: 700; }
 .opponent-tag { color: var(--text); font-size: 0.85rem; }
 
-/* ─── MODAL ─── */
 .modal {
   position: fixed;
   top: 0; left: 0; right: 0; bottom: 0;
@@ -520,7 +492,6 @@ body {
 .badge-ace { background: var(--red); color: var(--bg-primary); }
 .badge-rating { background: var(--bg-hover); color: var(--gold); border: 1px solid var(--gold); }
 
-/* ─── CHAMPION GRID ─── */
 .page-title { font-size: 1.5rem; margin-bottom: 20px; color: var(--text-light); }
 
 .champion-grid {
@@ -557,7 +528,6 @@ body {
 
 .back-btn:hover { border-color: var(--gold); color: var(--gold); }
 
-/* ─── CHAMPION DETAIL ─── */
 .champion-header {
   display: flex;
   align-items: center;
@@ -634,7 +604,6 @@ body {
 .counter-name { font-weight: 700; color: var(--text-light); }
 .counter-games { color: var(--text); font-size: 0.85rem; margin-top: 4px; }
 
-/* ─── RESPONSIVE ─── */
 @media (max-width: 768px) {
   .match-main { flex-wrap: wrap; }
   .match-stats { width: 100%; justify-content: flex-start; margin-top: 10px; }

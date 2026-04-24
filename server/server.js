@@ -34,58 +34,6 @@ const SummonerSchema = new mongoose.Schema({
   }
 });
 
-const RankHistorySchema = new mongoose.Schema({
-  puuid: { type: String, required: true, index: true },
-  timestamp: { type: Date, default: Date.now },
-  queueType: String, // 'RANKED_SOLO_5x5' or 'RANKED_FLEX_SR'
-  tier: String,
-  rank: String,
-  lp: Number,
-  wins: Number,
-  losses: Number
-});
-
-RankHistorySchema.index({ puuid: 1, queueType: 1, timestamp: -1 });
-
-const ParticipantSchema = new mongoose.Schema({
-  puuid: String,
-  gameName: String,
-  tagLine: String,
-  championId: Number,
-  championName: String,
-  kills: Number,
-  deaths: Number,
-  assists: Number,
-  kda: Number,
-  cs: Number,
-  csPerMin: Number,
-  goldEarned: Number,
-  goldPerMin: Number,
-  damageDealt: Number,
-  damagePerMin: Number,
-  visionScore: Number,
-  visionPerMin: Number,
-  killParticipation: Number,
-  role: String,
-  teamId: Number,
-  win: Boolean,
-  items: [Number],
-  runes: mongoose.Schema.Types.Mixed,
-  summonerSpells: [Number],
-  turretKills: Number,
-  dragonKills: Number,
-  baronKills: Number,
-  rating: Number,
-  ratingRank: String,
-  isMVP: Boolean,
-  isAce: Boolean,
-  ranked: {
-    tier: String,
-    rank: String,
-    lp: Number
-  }
-}, { _id: false });
-
 const MatchSchema = new mongoose.Schema({
   matchId: { type: String, required: true },
   puuid: { type: String, required: true, index: true },
@@ -131,7 +79,7 @@ const MatchSchema = new mongoose.Schema({
   opponentGold: Number,
   opponentDamage: Number,
   opponentVision: Number,
-  allParticipants: [ParticipantSchema],
+  allParticipants: [mongoose.Schema.Types.Mixed],
   csPerMin: Number,
   goldPerMin: Number,
   damagePerMin: Number,
@@ -141,7 +89,9 @@ const MatchSchema = new mongoose.Schema({
   ratingRank: String
 });
 
+// CRITICAL: Compound index for match lookup by matchId+puuid
 MatchSchema.index({ matchId: 1, puuid: 1 }, { unique: true });
+MatchSchema.index({ matchId: 1 }); // Also index matchId alone for finding any copy
 
 const ChampionStatsSchema = new mongoose.Schema({
   championId: { type: Number, required: true, unique: true },
@@ -161,10 +111,19 @@ const ChampionStatsSchema = new mongoose.Schema({
   lastUpdated: { type: Date, default: Date.now }
 });
 
-const Summoner = mongoose.model('Summoner', SummonerSchema);
-const RankHistory = mongoose.model('RankHistory', RankHistorySchema);
-const Match = mongoose.model('Match', MatchSchema);
+// Stores one snapshot per lookup when ranked data is available
+const LPHistorySchema = new mongoose.Schema({
+  puuid:     { type: String, required: true, index: true },
+  timestamp: { type: Date, default: Date.now },
+  solo: { tier: String, rank: String, lp: Number },
+  flex: { tier: String, rank: String, lp: Number }
+});
+LPHistorySchema.index({ puuid: 1, timestamp: -1 });
+
+const Summoner    = mongoose.model('Summoner',    SummonerSchema);
+const Match       = mongoose.model('Match',       MatchSchema);
 const ChampionStats = mongoose.model('ChampionStats', ChampionStatsSchema);
+const LPHistory   = mongoose.model('LPHistory',   LPHistorySchema);
 
 const REGION_ROUTING = {
   na1: 'americas', br1: 'americas', la1: 'americas', la2: 'americas',
@@ -183,6 +142,7 @@ async function loadDDragon() {
   try {
     const versionsRes = await axios.get('https://ddragon.leagueoflegends.com/api/versions.json');
     ddragonVersion = versionsRes.data[0];
+    console.log('DDragon version:', ddragonVersion);
     
     const champRes = await axios.get(`https://ddragon.leagueoflegends.com/cdn/${ddragonVersion}/data/en_US/champion.json`);
     for (const key in champRes.data.data) {
@@ -284,17 +244,15 @@ async function getPlayerRanks(puuids) {
 
 // ─── ROUTES ───
 
-// ─── ROUTES ───
-
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok' });
+  res.json({ status: 'ok', ddragonVersion });
 });
 
 app.get('/api/clear-data', async (req, res) => {
   await Match.deleteMany({});
   await ChampionStats.deleteMany({});
-  await RankHistory.deleteMany({});
-  res.json({ message: 'All data cleared. Search players to populate fresh data.' });
+  await Summoner.deleteMany({});
+  res.json({ message: 'All data cleared.' });
 });
 
 app.get('/api/summoner/:gameName/:tagLine', async (req, res) => {
@@ -303,106 +261,88 @@ app.get('/api/summoner/:gameName/:tagLine', async (req, res) => {
     const region = req.query.region || 'na1';
     const routing = REGION_ROUTING[region] || 'americas';
 
-    // ── ALWAYS fetch fresh data from Riot (remove stale-cache early return) ──
+    console.log(`[SUMMONER] Looking up ${gameName}#${tagLine} on ${region}`);
+
     const accountRes = await axios.get(
       `https://${routing}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/${encodeURIComponent(gameName)}/${encodeURIComponent(tagLine)}`,
       { headers: { 'X-Riot-Token': RIOT_API_KEY }, timeout: 10000 }
     );
     const puuid = accountRes.data.puuid;
+    console.log(`[SUMMONER] PUUID: ${puuid}`);
 
     const summonerRes = await axios.get(
       `https://${region}.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/${puuid}`,
       { headers: { 'X-Riot-Token': RIOT_API_KEY }, timeout: 10000 }
     );
     const summonerData = summonerRes.data;
+    console.log(`[SUMMONER] Level: ${summonerData.summonerLevel}, Icon: ${summonerData.profileIconId}, SummonerId: ${summonerData.id}`);
 
-    let rankedData = { solo: null, flex: null };
+    let rankedData = null; // null = fetch failed; {} = fetch ok but unranked
     try {
+      const rankedUrl = `https://${region}.api.riotgames.com/lol/league/v4/entries/by-summoner/${summonerData.id}`;
+      console.log(`[SUMMONER] Fetching ranked from: ${rankedUrl}`);
+      
       const rankedRes = await axios.get(
-        `https://${region}.api.riotgames.com/lol/league/v4/entries/by-summoner/${summonerData.id}`,
+        rankedUrl,
         { headers: { 'X-Riot-Token': RIOT_API_KEY }, timeout: 10000 }
       );
 
+      console.log(`[SUMMONER] Ranked entries count: ${rankedRes.data.length}`);
+      console.log(`[SUMMONER] Ranked raw:`, JSON.stringify(rankedRes.data));
+
+      rankedData = { solo: null, flex: null }; // fetch succeeded
       for (const entry of rankedRes.data) {
-        const mapped = {
-          tier: entry.tier,
-          rank: entry.rank,
-          lp: entry.leaguePoints,
-          wins: entry.wins,
-          losses: entry.losses
-        };
+        const mapped = { tier: entry.tier, rank: entry.rank, lp: entry.leaguePoints, wins: entry.wins, losses: entry.losses };
+        console.log(`[SUMMONER] Entry: ${entry.queueType} -> ${entry.tier} ${entry.rank} ${entry.leaguePoints}LP`);
         if (entry.queueType === 'RANKED_SOLO_5x5') rankedData.solo = mapped;
         if (entry.queueType === 'RANKED_FLEX_SR') rankedData.flex = mapped;
       }
+
+      // Save LP history snapshot whenever we have a successful ranked response
+      await LPHistory.create({
+        puuid,
+        timestamp: new Date(),
+        solo: rankedData.solo ? { tier: rankedData.solo.tier, rank: rankedData.solo.rank, lp: rankedData.solo.lp } : null,
+        flex: rankedData.flex ? { tier: rankedData.flex.tier, rank: rankedData.flex.rank, lp: rankedData.flex.lp } : null
+      });
+
     } catch (rankErr) {
-      console.error('Ranked fetch error:', rankErr.message);
+      console.error('[SUMMONER] Ranked fetch FAILED:', rankErr.message);
+      if (rankErr.response) {
+        console.error('[SUMMONER] Ranked error status:', rankErr.response.status);
+        console.error('[SUMMONER] Ranked error data:', rankErr.response.data);
+      }
+      // rankedData stays null — we won't overwrite the DB with nulls
     }
 
-    // ── Save rank history if changed or brand-new ──
-    const existing = await Summoner.findOne({ puuid });
-    const hasChanged = !existing ||
-      JSON.stringify(existing.ranked?.solo) !== JSON.stringify(rankedData.solo) ||
-      JSON.stringify(existing.ranked?.flex) !== JSON.stringify(rankedData.flex);
+    console.log(`[SUMMONER] Final rankedData:`, JSON.stringify(rankedData));
 
-    if (hasChanged) {
-      if (rankedData.solo) {
-        await RankHistory.create({
-          puuid,
-          queueType: 'RANKED_SOLO_5x5',
-          tier: rankedData.solo.tier,
-          rank: rankedData.solo.rank,
-          lp: rankedData.solo.lp,
-          wins: rankedData.solo.wins,
-          losses: rankedData.solo.losses
-        });
-      }
-      if (rankedData.flex) {
-        await RankHistory.create({
-          puuid,
-          queueType: 'RANKED_FLEX_SR',
-          tier: rankedData.flex.tier,
-          rank: rankedData.flex.rank,
-          lp: rankedData.flex.lp,
-          wins: rankedData.flex.wins,
-          losses: rankedData.flex.losses
-        });
-      }
-    }
+    // Build the fields to update — only include `ranked` when the Riot API call succeeded
+    const updateFields = {
+      puuid,
+      gameName: accountRes.data.gameName,
+      tagLine: accountRes.data.tagLine,
+      region,
+      summonerLevel: summonerData.summonerLevel,
+      profileIconId: summonerData.profileIconId,
+      accountId: summonerData.accountId,
+      summonerId: summonerData.id,
+      lastUpdated: new Date()
+    };
+    if (rankedData !== null) updateFields.ranked = rankedData;
 
     const summoner = await Summoner.findOneAndUpdate(
       { puuid },
-      {
-        puuid,
-        gameName: accountRes.data.gameName,
-        tagLine: accountRes.data.tagLine,
-        region,
-        summonerLevel: summonerData.summonerLevel,
-        profileIconId: summonerData.profileIconId,
-        accountId: summonerData.accountId,
-        summonerId: summonerData.id,
-        lastUpdated: new Date(),
-        ranked: rankedData
-      },
+      updateFields,
       { upsert: true, new: true }
     );
 
     res.json(summoner);
 
   } catch (error) {
+    console.error('[SUMMONER] Main error:', error.message);
     const { status, message } = getRiotError(error);
     res.status(status).json({ error: message });
-  }
-});
-
-app.get('/api/rank-history/:puuid', async (req, res) => {
-  try {
-    const { puuid } = req.params;
-    const history = await RankHistory.find({ puuid, queueType: 'RANKED_SOLO_5x5' })
-      .sort({ timestamp: 1 })
-      .limit(50);
-    res.json(history);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
   }
 });
 
@@ -417,7 +357,6 @@ app.get('/api/matches/:puuid', async (req, res) => {
     cached = cached.map(m => {
       const doc = m.toObject();
       const durationMin = doc.gameDuration / 60;
-      
       if (doc.csPerMin == null) doc.csPerMin = durationMin > 0 ? parseFloat((doc.cs / durationMin).toFixed(1)) : 0;
       if (doc.goldPerMin == null) doc.goldPerMin = durationMin > 0 ? Math.round(doc.goldEarned / durationMin) : 0;
       if (doc.damagePerMin == null) doc.damagePerMin = durationMin > 0 ? Math.round((doc.damageDealt || 0) / durationMin) : 0;
@@ -426,7 +365,6 @@ app.get('/api/matches/:puuid', async (req, res) => {
         const tk = doc.teamKills || 1;
         doc.killParticipation = tk > 0 ? parseFloat(((doc.kills + doc.assists) / tk * 100).toFixed(1)) : 0;
       }
-      
       return doc;
     });
 
@@ -545,7 +483,7 @@ app.get('/api/matches/:puuid', async (req, res) => {
         if (mvpIdx >= 0) allParticipants[mvpIdx].isMVP = true;
       }
       if (ace) {
-        const aceIdx = allParticipants.findIndex(p => p.uuid === ace.puuid);
+        const aceIdx = allParticipants.findIndex(p => p.puuid === ace.puuid);
         if (aceIdx >= 0) allParticipants[aceIdx].isAce = true;
       }
 
@@ -559,9 +497,7 @@ app.get('/api/matches/:puuid', async (req, res) => {
 
       if (items.length >= 3) {
         const coreBuild = items.slice(0, 3).join(',');
-        if (!itemBuilds[coreBuild]) {
-          itemBuilds[coreBuild] = { items: items.slice(0, 3), wins: 0, games: 0 };
-        }
+        if (!itemBuilds[coreBuild]) itemBuilds[coreBuild] = { items: items.slice(0, 3), wins: 0, games: 0 };
         itemBuilds[coreBuild].games++;
         if (participant.win) itemBuilds[coreBuild].wins++;
       }
@@ -574,8 +510,7 @@ app.get('/api/matches/:puuid', async (req, res) => {
               runes: participant.perks.styles[0].selections.slice(0, 4),
               primaryStyle: participant.perks.styles[0]?.style,
               subStyle: participant.perks.styles[1]?.style,
-              wins: 0,
-              games: 0
+              wins: 0, games: 0
             };
           }
           runeBuilds[primaryRunes].games++;
@@ -588,19 +523,14 @@ app.get('/api/matches/:puuid', async (req, res) => {
         {
           championName: participant.championName,
           $inc: {
-            games: 1,
-            wins: participant.win ? 1 : 0,
-            losses: participant.win ? 0 : 1,
-            totalKills: participant.kills,
-            totalDeaths: participant.deaths,
-            totalAssists: participant.assists,
+            games: 1, wins: participant.win ? 1 : 0, losses: participant.win ? 0 : 1,
+            totalKills: participant.kills, totalDeaths: participant.deaths, totalAssists: participant.assists,
             totalGold: participant.goldEarned,
             totalCs: participant.totalMinionsKilled + (participant.neutralMinionsKilled || 0),
             totalDamage: participant.totalDamageDealtToChampions || 0,
             totalVision: participant.visionScore
           },
-          itemBuilds,
-          runeBuilds,
+          itemBuilds, runeBuilds,
           lastUpdated: new Date()
         },
         { upsert: true }
@@ -672,7 +602,6 @@ app.get('/api/matches/:puuid', async (req, res) => {
 
       await matchDoc.save();
       matches.push(matchDoc.toObject());
-
       await sleep(1200);
     }
 
@@ -711,10 +640,28 @@ app.get('/api/mastery/:puuid', async (req, res) => {
   }
 });
 
+// CRITICAL FIX: Need puuid to find the right match copy
 app.get('/api/match/:matchId', async (req, res) => {
   try {
-    let match = await Match.findOne({ matchId: req.params.matchId });
-    if (!match) return res.status(404).json({ error: 'Match not found' });
+    const { matchId } = req.params;
+    const { puuid } = req.query; // Get puuid from query to find the right player's copy
+    
+    console.log(`[MATCH] Looking up match ${matchId} for puuid ${puuid || 'NONE'}`);
+    
+    let match;
+    
+    if (puuid) {
+      // If we have puuid, find the specific player's copy
+      match = await Match.findOne({ matchId, puuid });
+    } else {
+      // Fallback: find any copy (but this might be the wrong player)
+      match = await Match.findOne({ matchId });
+    }
+    
+    if (!match) {
+      console.log(`[MATCH] Not found in database: ${matchId}`);
+      return res.status(404).json({ error: 'Match not found. It may not have been saved yet, or you need to provide the player PUUID.' });
+    }
     
     const doc = match.toObject();
     const durationMin = doc.gameDuration / 60;
@@ -738,15 +685,14 @@ app.get('/api/match/:matchId', async (req, res) => {
         if (p.goldPerMin == null) p.goldPerMin = pDurationMin > 0 ? Math.round(p.goldEarned / pDurationMin) : 0;
         if (p.damagePerMin == null) p.damagePerMin = pDurationMin > 0 ? Math.round((p.damageDealt || 0) / pDurationMin) : 0;
         if (p.visionPerMin == null) p.visionPerMin = pDurationMin > 0 ? parseFloat((p.visionScore / pDurationMin).toFixed(1)) : 0;
-        
         p.ranked = rankMap[p.puuid] || null;
-        
         return p;
       });
     }
     
     res.json(doc);
   } catch (error) {
+    console.error('[MATCH] Error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
@@ -755,10 +701,7 @@ app.get('/api/summoner-by-puuid/:puuid', async (req, res) => {
   try {
     const { puuid } = req.params;
     const region = req.query.region || 'na1';
-    
-    // Always fetch fresh ranked data instead of returning stale cache
-    let summoner = await Summoner.findOne({ puuid });
-    
+
     const summonerRes = await axios.get(
       `https://${region}.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/${puuid}`,
       { headers: { 'X-Riot-Token': RIOT_API_KEY }, timeout: 10000 }
@@ -782,32 +725,10 @@ app.get('/api/summoner-by-puuid/:puuid', async (req, res) => {
         if (entry.queueType === 'RANKED_FLEX_SR') rankedData.flex = mapped;
       }
     } catch (rankErr) {
-      console.error('Ranked fetch error (by-puuid):', rankErr.message);
+      console.error('[BY-PUUID] Ranked fetch error:', rankErr.message);
     }
 
-    const existing = await Summoner.findOne({ puuid });
-    const hasChanged = !existing ||
-      JSON.stringify(existing.ranked?.solo) !== JSON.stringify(rankedData.solo) ||
-      JSON.stringify(existing.ranked?.flex) !== JSON.stringify(rankedData.flex);
-
-    if (hasChanged) {
-      if (rankedData.solo) {
-        await RankHistory.create({
-          puuid, queueType: 'RANKED_SOLO_5x5',
-          tier: rankedData.solo.tier, rank: rankedData.solo.rank, lp: rankedData.solo.lp,
-          wins: rankedData.solo.wins, losses: rankedData.solo.losses
-        });
-      }
-      if (rankedData.flex) {
-        await RankHistory.create({
-          puuid, queueType: 'RANKED_FLEX_SR',
-          tier: rankedData.flex.tier, rank: rankedData.flex.rank, lp: rankedData.flex.lp,
-          wins: rankedData.flex.wins, losses: rankedData.flex.losses
-        });
-      }
-    }
-
-    summoner = await Summoner.findOneAndUpdate(
+    const summoner = await Summoner.findOneAndUpdate(
       { puuid },
       {
         puuid,
@@ -827,6 +748,34 @@ app.get('/api/summoner-by-puuid/:puuid', async (req, res) => {
   } catch (error) {
     const { status, message } = getRiotError(error);
     res.status(status).json({ error: message });
+  }
+});
+
+// Returns a flat { id -> { icon, name } } map built from runesReforged.json
+// Used by the frontend to build correct DDragon image URLs
+app.get('/api/runes', (req, res) => {
+  const map = {};
+  for (const tree of runeData) {
+    map[tree.id] = { icon: tree.icon, name: tree.name };
+    for (const slot of tree.slots) {
+      for (const rune of slot.runes) {
+        map[rune.id] = { icon: rune.icon, name: rune.name };
+      }
+    }
+  }
+  res.json({ version: ddragonVersion, runes: map });
+});
+
+// Returns up to 30 LP history snapshots for a player (newest last for charting)
+app.get('/api/lp-history/:puuid', async (req, res) => {
+  try {
+    const history = await LPHistory.find({ puuid: req.params.puuid })
+      .sort({ timestamp: -1 })
+      .limit(30)
+      .lean();
+    res.json(history.reverse()); // chronological order for charts
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

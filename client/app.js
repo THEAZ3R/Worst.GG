@@ -1,5 +1,16 @@
 const API_URL = window.location.origin.includes('localhost') ? 'http://localhost:5000/api' : '/api';
 let currentRegion = 'na1';
+let currentDDragonVersion = '14.8.1';
+let currentPuuid = null;
+let runeIconMap = {}; // { [runeId]: { icon: 'perk-images/...', name: '...' } }
+
+fetch(`${API_URL}/health`).then(r => r.json()).then(d => {
+  if (d.ddragonVersion) currentDDragonVersion = d.ddragonVersion;
+}).catch(() => {});
+
+fetch(`${API_URL}/runes`).then(r => r.json()).then(d => {
+  runeIconMap = d.runes || {};
+}).catch(() => {});
 
 function showPage(page) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
@@ -25,7 +36,6 @@ async function searchSummoner() {
   document.getElementById('loading').style.display = 'block';
   document.getElementById('error').style.display = 'none';
   document.getElementById('profile').innerHTML = '';
-  document.getElementById('rankHistory').innerHTML = '';
   document.getElementById('mastery').innerHTML = '';
   document.getElementById('matches').innerHTML = '';
 
@@ -38,8 +48,11 @@ async function searchSummoner() {
       return;
     }
 
+    currentPuuid = profile.puuid;
+    console.log('Profile data:', profile);
+    console.log('Ranked data:', JSON.stringify(profile.ranked));
+
     renderProfile(profile);
-    await loadRankHistory(profile.puuid);
 
     const [matchesRes, masteryRes] = await Promise.all([
       fetch(`${API_URL}/matches/${profile.puuid}?region=${currentRegion}`),
@@ -68,8 +81,10 @@ function renderProfile(data) {
   const solo = data.ranked?.solo;
   let rankHtml = '';
 
-  if (solo) {
-    const total = solo.wins + solo.losses;
+  console.log('Rendering profile, solo:', solo);
+
+  if (solo && solo.tier) {
+    const total = (solo.wins || 0) + (solo.losses || 0);
     const wr = total > 0 ? ((solo.wins / total) * 100).toFixed(1) : 0;
     const wrClass = wr >= 50 ? 'winrate-good' : 'winrate-bad';
 
@@ -79,11 +94,13 @@ function renderProfile(data) {
         <div class="rank-lp">${solo.lp} LP</div>
         <div class="rank-record"><span class="${wrClass}">${wr}% WR</span> — ${solo.wins}W / ${solo.losses}L</div>
       </div>`;
+  } else {
+    rankHtml = `<div class="rank-box"><div class="rank-tier" style="color:var(--text-muted)">Unranked</div></div>`;
   }
 
   const flex = data.ranked?.flex;
-  if (flex) {
-    const total = flex.wins + flex.losses;
+  if (flex && flex.tier) {
+    const total = (flex.wins || 0) + (flex.losses || 0);
     const wr = total > 0 ? ((flex.wins / total) * 100).toFixed(1) : 0;
     rankHtml += `
       <div class="rank-box">
@@ -93,10 +110,11 @@ function renderProfile(data) {
       </div>`;
   }
 
+  const iconUrl = `https://ddragon.leagueoflegends.com/cdn/${currentDDragonVersion}/img/profileicon/${data.profileIconId}.png`;
+
   document.getElementById('profile').innerHTML = `
     <div class="profile-card">
-      <img src="https://ddragon.leagueoflegends.com/cdn/14.8.1/img/profileicon/${data.profileIconId}.png"
-           alt="icon" class="profile-icon" onerror="this.src='https://via.placeholder.com/100'">
+      <img src="${iconUrl}" alt="icon" class="profile-icon" onerror="this.onerror=null;this.src='https://ddragon.leagueoflegends.com/cdn/14.8.1/img/profileicon/0.png'">
       <div class="profile-info">
         <h2>${data.gameName} <span class="profile-tag">#${data.tagLine}</span></h2>
         <div class="profile-level">Level ${data.summonerLevel}</div>
@@ -113,131 +131,6 @@ function getTierColor(tier) {
     'CHALLENGER': '#f0e6d2'
   };
   return colors[tier] || '#a09b8c';
-}
-
-function getBestRank(history) {
-  const tierOrder = { 'IRON':0, 'BRONZE':1, 'SILVER':2, 'GOLD':3, 'PLATINUM':4, 'EMERALD':5, 'DIAMOND':6, 'MASTER':7, 'GRANDMASTER':8, 'CHALLENGER':9 };
-  const rankOrder = { 'IV':4, 'III':3, 'II':2, 'I':1 };
-  return history.reduce((best, curr) => {
-    const ct = tierOrder[curr.tier] ?? -1, bt = tierOrder[best.tier] ?? -1;
-    if (ct > bt) return curr;
-    if (ct === bt) {
-      const cr = rankOrder[curr.rank] ?? 5, br = rankOrder[best.rank] ?? 5;
-      if (cr < br) return curr;
-      if (cr === br && curr.lp > best.lp) return curr;
-    }
-    return best;
-  });
-}
-
-async function loadRankHistory(puuid) {
-  const container = document.getElementById('rankHistory');
-  try {
-    const res = await fetch(`${API_URL}/rank-history/${puuid}`);
-    if (!res.ok) {
-      container.innerHTML = `<div class="rank-history-section"><div class="section-title">Ranked Journey</div><div class="no-data">Could not load rank history (status ${res.status}).</div></div>`;
-      return;
-    }
-    const history = await res.json();
-    renderRankHistory(history);
-  } catch (e) {
-    console.error('Rank history error:', e);
-    container.innerHTML = `<div class="rank-history-section"><div class="section-title">Ranked Journey</div><div class="no-data">Error loading rank history.</div></div>`;
-  }
-}
-
-function renderRankHistory(history) {
-  const container = document.getElementById('rankHistory');
-  const solo = (history || []).filter(h => h.queueType === 'RANKED_SOLO_5x5');
-
-  // ALWAYS render the section so the user knows it exists
-  let html = `
-    <div class="rank-history-section">
-      <div class="section-header">
-        <div class="section-title">Ranked Journey</div>
-      </div>`;
-
-  if (solo.length === 0) {
-    html += `
-      <div class="no-data" style="margin-bottom:10px;">No solo queue history tracked yet.<br>
-      <span style="font-size:0.8rem;color:var(--text-muted);">History is recorded only when your rank changes after a lookup.</span></div>
-      <div class="season-note">Previous season final ranks are not available in Riot's public API.</div>
-    </div>`;
-    container.innerHTML = html;
-    return;
-  }
-
-  const best = getBestRank(solo);
-  html += `
-    <div class="best-rank">Peak this season: <span style="color:${getTierColor(best.tier)}">${best.tier} ${best.rank}</span> @ ${best.lp} LP</div>
-    <div class="chart-container"><canvas id="lpChart"></canvas></div>
-    <div class="season-note">Previous season final ranks are not exposed by Riot's public API.</div>
-  </div>`;
-
-  container.innerHTML = html;
-
-  if (typeof Chart === 'undefined') {
-    container.innerHTML += '<div class="error-box">Chart.js failed to load. Check your internet connection.</div>';
-    return;
-  }
-
-  const labels = solo.map(h => {
-    const d = new Date(h.timestamp);
-    return `${d.getMonth()+1}/${d.getDate()}`;
-  });
-  const dataPoints = solo.map(h => h.lp);
-
-  const ctx = document.getElementById('lpChart').getContext('2d');
-  new Chart(ctx, {
-    type: 'line',
-    data: {
-      labels,
-      datasets: [{
-        label: 'LP',
-        data: dataPoints,
-        borderColor: '#c8aa6e',
-        backgroundColor: 'rgba(200, 170, 110, 0.08)',
-        borderWidth: 2,
-        fill: true,
-        tension: 0.3,
-        pointRadius: 3,
-        pointHoverRadius: 5,
-        pointBackgroundColor: '#c8aa6e'
-      }]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      interaction: { mode: 'index', intersect: false },
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          backgroundColor: '#1a1f2e',
-          titleColor: '#f0e6d2',
-          bodyColor: '#a09b8c',
-          borderColor: '#2a3042',
-          borderWidth: 1,
-          displayColors: false,
-          callbacks: {
-            label: function(context) {
-              const entry = solo[context.dataIndex];
-              return `${entry.tier} ${entry.rank} — ${entry.lp} LP`;
-            }
-          }
-        }
-      },
-      scales: {
-        x: {
-          grid: { color: 'rgba(42,48,66,0.5)' },
-          ticks: { color: '#5b5a56', font: { size: 10 } }
-        },
-        y: {
-          grid: { color: 'rgba(42,48,66,0.5)' },
-          ticks: { color: '#a09b8c', font: { size: 10 } }
-        }
-      }
-    }
-  });
 }
 
 function renderMastery(list) {
@@ -282,23 +175,27 @@ function renderMatches(matches) {
 
     let runesHtml = '';
     if (m.runes && m.runes.styles) {
-      const primary = m.runes.styles[0]?.selections?.[0]?.perk;
-      if (primary) runesHtml += `<img src="https://ddragon.leagueoflegends.com/cdn/img/perk/${primary}.png" class="rune-icon" onerror="this.style.display='none'">`;
-      const secondary = m.runes.styles[1]?.style;
-      if (secondary) runesHtml += `<img src="https://ddragon.leagueoflegends.com/cdn/img/perkStyle/${secondary}.png" class="rune-icon" style="opacity:0.7" onerror="this.style.display='none'">`;
+      const primaryId = m.runes.styles[0]?.selections?.[0]?.perk;
+      const secondaryStyleId = m.runes.styles[1]?.style;
+      if (primaryId && runeIconMap[primaryId]) {
+        runesHtml += `<img src="https://ddragon.leagueoflegends.com/cdn/img/${runeIconMap[primaryId].icon}" class="rune-icon" title="${runeIconMap[primaryId].name}" onerror="this.style.display='none'">`;
+      }
+      if (secondaryStyleId && runeIconMap[secondaryStyleId]) {
+        runesHtml += `<img src="https://ddragon.leagueoflegends.com/cdn/img/${runeIconMap[secondaryStyleId].icon}" class="rune-icon" style="opacity:0.7" title="${runeIconMap[secondaryStyleId].name}" onerror="this.style.display='none'">`;
+      }
     }
 
     let itemsHtml = '';
     for (let i = 0; i < 6; i++) {
       const itemId = m.items?.[i];
-      if (itemId) itemsHtml += `<img src="https://ddragon.leagueoflegends.com/cdn/14.8.1/img/item/${itemId}.png" class="item-icon" onerror="this.style.display='none'">`;
+      if (itemId) itemsHtml += `<img src="https://ddragon.leagueoflegends.com/cdn/${currentDDragonVersion}/img/item/${itemId}.png" class="item-icon" onerror="this.style.display='none'">`;
       else itemsHtml += `<div class="item-icon" style="opacity:0.2;background:var(--bg-secondary)"></div>`;
     }
 
     let spellsHtml = '';
     if (m.summonerSpells) {
       for (const spellId of m.summonerSpells) {
-        spellsHtml += `<img src="https://ddragon.leagueoflegends.com/cdn/14.8.1/img/spell/Summoner${getSpellName(spellId)}.png" class="rune-icon" onerror="this.style.display='none'">`;
+        spellsHtml += `<img src="https://ddragon.leagueoflegends.com/cdn/${currentDDragonVersion}/img/spell/Summoner${getSpellName(spellId)}.png" class="rune-icon" onerror="this.style.display='none'">`;
       }
     }
 
@@ -308,7 +205,7 @@ function renderMatches(matches) {
         <div class="opponent-row">
           <div class="opponent-label">vs</div>
           <div class="opponent-info" onclick="event.stopPropagation(); viewOpponent('${m.opponentPuuid}', '${m.opponentName}', '${m.opponentTag || ''}')">
-            <img src="https://ddragon.leagueoflegends.com/cdn/14.8.1/img/champion/${m.opponentChampionName}.png" onerror="this.src='https://via.placeholder.com/40'">
+            <img src="https://ddragon.leagueoflegends.com/cdn/${currentDDragonVersion}/img/champion/${m.opponentChampionName}.png" onerror="this.src='https://via.placeholder.com/40'">
             <div>
               <div class="opponent-name">${m.opponentName}</div>
               <div class="opponent-tag">${m.opponentChampionName}</div>
@@ -322,7 +219,7 @@ function renderMatches(matches) {
         <div class="match-main">
           <div class="match-result ${resultClass}">${resultText}</div>
           <div class="match-champion">
-            <img src="https://ddragon.leagueoflegends.com/cdn/14.8.1/img/champion/${m.championName}.png" class="champ-img" onerror="this.style.display='none'">
+            <img src="https://ddragon.leagueoflegends.com/cdn/${currentDDragonVersion}/img/champion/${m.championName}.png" class="champ-img" onerror="this.style.display='none'">
             <div class="champ-info">
               <div class="champ-name">${m.championName}</div>
               <div class="champ-level">${m.role}</div>
@@ -382,7 +279,6 @@ async function viewOpponent(puuid, name, tag) {
   document.getElementById('loading').style.display = 'block';
   document.getElementById('error').style.display = 'none';
   document.getElementById('profile').innerHTML = '';
-  document.getElementById('rankHistory').innerHTML = '';
   document.getElementById('mastery').innerHTML = '';
   document.getElementById('matches').innerHTML = '';
 
@@ -393,8 +289,8 @@ async function viewOpponent(puuid, name, tag) {
       showError(data.error || 'Failed to load opponent');
       return;
     }
+    currentPuuid = data.puuid;
     renderProfile(data);
-    await loadRankHistory(data.puuid);
 
     const [matchesRes, masteryRes] = await Promise.all([
       fetch(`${API_URL}/matches/${puuid}?region=${currentRegion}`),
@@ -423,7 +319,13 @@ async function openMatchDetail(matchId) {
   content.innerHTML = '<div class="loading"><div class="spinner"></div><p>Loading match details...</p></div>';
 
   try {
-    const res = await fetch(`${API_URL}/match/${matchId}`);
+    const url = currentPuuid 
+      ? `${API_URL}/match/${matchId}?puuid=${currentPuuid}`
+      : `${API_URL}/match/${matchId}`;
+    
+    console.log('Fetching match detail:', url);
+    
+    const res = await fetch(url);
     const match = await res.json();
 
     if (!res.ok) {
@@ -485,11 +387,16 @@ async function openMatchDetail(matchId) {
         const isOpponent = p.puuid !== match.puuid;
 
         let playerRunesHtml = '';
+        
         if (p.runes && p.runes.styles && p.runes.styles.length > 0) {
-          const primary = p.runes.styles[0]?.selections?.[0]?.perk;
-          const secondary = p.runes.styles[1]?.style;
-          if (primary) playerRunesHtml += `<img src="https://ddragon.leagueoflegends.com/cdn/img/perk/${primary}.png" onerror="this.style.display='none'">`;
-          if (secondary) playerRunesHtml += `<img src="https://ddragon.leagueoflegends.com/cdn/img/perkStyle/${secondary}.png" class="secondary-rune" onerror="this.style.display='none'">`;
+          const primaryId = p.runes.styles[0]?.selections?.[0]?.perk;
+          const secondaryStyleId = p.runes.styles[1]?.style;
+          if (primaryId && runeIconMap[primaryId]) {
+            playerRunesHtml += `<img src="https://ddragon.leagueoflegends.com/cdn/img/${runeIconMap[primaryId].icon}" title="${runeIconMap[primaryId].name}" onerror="this.style.display='none'">`;
+          }
+          if (secondaryStyleId && runeIconMap[secondaryStyleId]) {
+            playerRunesHtml += `<img src="https://ddragon.leagueoflegends.com/cdn/img/${runeIconMap[secondaryStyleId].icon}" class="secondary-rune" title="${runeIconMap[secondaryStyleId].name}" onerror="this.style.display='none'">`;
+          }
         }
 
         let playerRankHtml = '<span style="color:var(--text-muted);font-size:0.75rem;">Not cached</span>';
@@ -501,7 +408,7 @@ async function openMatchDetail(matchId) {
           <div class="player-row ${isMVP ? 'mvp' : ''} ${isAce ? 'ace' : ''} ${isOpponent ? 'clickable' : ''}"
                ${isOpponent ? `onclick="closeMatchModal(); viewOpponent('${p.puuid}', '${p.gameName}', '${p.tagLine}')"` : ''}>
             <div class="player-champ-wrap">
-              <img src="https://ddragon.leagueoflegends.com/cdn/14.8.1/img/champion/${p.championName}.png" class="player-champ" onerror="this.style.display='none'">
+              <img src="https://ddragon.leagueoflegends.com/cdn/${currentDDragonVersion}/img/champion/${p.championName}.png" class="player-champ" onerror="this.style.display='none'">
               ${playerRunesHtml ? `<div class="player-runes-overlay">${playerRunesHtml}</div>` : ''}
             </div>
             <div class="player-name" title="${p.gameName}#${p.tagLine}">${p.gameName}</div>
