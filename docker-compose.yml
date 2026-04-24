@@ -1,0 +1,10 @@
+services:
+  backend:
+    build: ./server
+    container_name: lol-backend
+    ports:
+      - "5000:5000"
+    env_file:
+      - ./server/.env
+    volumes:
+      - ./client:/client:ro

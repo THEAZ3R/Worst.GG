@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WorstGG - LoL Stats</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <div class="site-header">
+    <div class="logo" onclick="showPage('lookup')">WorstGG</div>
+    <nav class="main-nav">
+      <button onclick="showPage('lookup')" class="nav-btn active" id="nav-lookup">Player Lookup</button>
+      <button onclick="showPage('champions')" class="nav-btn" id="nav-champions">Champions</button>
+    </nav>
+  </div>
+
+  <div id="page-lookup" class="page active">
+    <div class="search-section">
+      <div class="search-box">
+        <div class="search-inputs">
+          <input type="text" id="gameName" placeholder="Game Name" autocomplete="off">
+          <span class="tag-hash">#</span>
+          <input type="text" id="tagLine" placeholder="Tag" value="NA1" autocomplete="off">
+          <select id="region">
+            <option value="na1">NA</option>
+            <option value="euw1">EUW</option>
+            <option value="eune1">EUNE</option>
+            <option value="kr">KR</option>
+            <option value="jp1">JP</option>
+            <option value="br1">BR</option>
+            <option value="la1">LAN</option>
+            <option value="la2">LAS</option>
+            <option value="oc1">OCE</option>
+            <option value="tr1">TR</option>
+            <option value="ru">RU</option>
+          </select>
+          <button onclick="searchSummoner()" class="search-btn">.GG</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="container">
+      <div id="loading" class="loading" style="display:none;">
+        <div class="spinner"></div>
+        <p>Fetching summoner data...</p>
+      </div>
+      <div id="error" class="error-box" style="display:none;"></div>
+      <div id="profile"></div>
+      <div id="rankHistory"></div>
+      <div id="mastery"></div>
+      <div id="matches"></div>
+    </div>
+  </div>
+
+  <div id="page-champions" class="page">
+    <div class="container">
+      <h2 class="page-title">Champions</h2>
+      <div class="search-box">
+        <input type="text" id="championSearch" placeholder="Search champion..." oninput="filterChampions()">
+      </div>
+      <div id="championGrid" class="champion-grid"></div>
+    </div>
+  </div>
+
+  <div id="page-champion-detail" class="page">
+    <div class="container">
+      <button onclick="showPage('champions')" class="back-btn">← Back</button>
+      <div id="championDetail"></div>
+    </div>
+  </div>
+
+  <div id="matchModal" class="modal" style="display:none;">
+    <div class="modal-content">
+      <button onclick="closeMatchModal()" class="modal-close">×</button>
+      <div id="matchDetailContent"></div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
